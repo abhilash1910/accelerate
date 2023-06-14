@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.data_loader import prepare_data_loader
 from accelerate.state import AcceleratorState
-from accelerate.test_utils import RegressionDataset, RegressionModel, are_the_same_tensors
+from accelerate.test_utils import RegressionDataset, are_the_same_tensors
 from accelerate.utils import (
     DistributedType,
     gather,
@@ -38,6 +38,13 @@ from accelerate.utils import (
     set_seed,
     synchronize_rng_states,
 )
+
+
+# TODO: remove RegressionModel4XPU once ccl support empty buffer in broadcasting.
+if is_xpu_available():
+    from accelerate.test_utils import RegressionModel4XPU as RegressionModel
+else:
+    from accelerate.test_utils import RegressionModel
 
 
 def print_main(state):
@@ -144,6 +151,9 @@ def rng_sync_check():
     if state.distributed_type == DistributedType.MULTI_GPU:
         synchronize_rng_states(["cuda"])
         assert are_the_same_tensors(torch.cuda.get_rng_state()), "RNG states improperly synchronized on GPU."
+    elif state.distributed_type == DistributedType.MULTI_XPU:
+        synchronize_rng_states(["xpu"])
+        assert are_the_same_tensors(torch.xpu.get_rng_state()), "RNG states improperly synchronized on XPU."
     generator = torch.Generator()
     synchronize_rng_states(["generator"], generator=generator)
     assert are_the_same_tensors(generator.get_state()), "RNG states improperly synchronized in generator."
@@ -455,7 +465,7 @@ def test_split_between_processes_list():
             len(results) == 2
         ), f"Each process did not have two items. Process index: {state.process_index}; Length: {len(results)}"
 
-    data = list(range(0, (2 * state.num_processes) + 1))
+    data = list(range(0, (2 * state.num_processes) + 3))
     with state.split_between_processes(data, apply_padding=True) as results:
         if state.is_last_process:
             # Test that the last process gets the extra item(s)
@@ -463,6 +473,7 @@ def test_split_between_processes_list():
             assert (
                 len(results) == num_samples_per_device
             ), f"Last process did not get the extra item(s). Process index: {state.process_index}; Length: {len(results)}"
+    state.wait_for_everyone()
 
 
 def test_split_between_processes_nested_dict():
@@ -475,14 +486,15 @@ def test_split_between_processes_nested_dict():
                 assert results["a"] == data_copy["a"][: 4 // state.num_processes]
             elif state.num_processes == 2:
                 assert results["a"] == data_copy["a"][2:]
-            else:
-                assert results["a"] == data_copy["a"][-1]
+            elif state.process_index == 3:
+                # We return a list each time
+                assert results["a"] == data_copy["a"][-1:], f'Expected: {data_copy["a"][-1]}, Actual: {results["a"]}'
             if state.process_index == 0:
                 assert results["b"] == data_copy["b"][: 4 // state.num_processes]
             elif state.num_processes == 2:
                 assert results["b"] == data_copy["b"][2:]
-            else:
-                assert results["b"] == data_copy["b"][-1]
+            elif state.process_index == 3:
+                assert results["b"] == data_copy["b"][-1:]
             if state.process_index == 0:
                 assert torch.allclose(
                     results["c"], data_copy["c"][: 4 // state.num_processes]

@@ -181,7 +181,7 @@ class PartialState:
                         if self.device is not None:
                             torch.cuda.set_device(self.device)
                 self._mixed_precision = "no"  # deepspeed handles mixed_precision using deepspeed_config
-            elif int(os.environ.get("LOCAL_RANK", -1)) != -1 and not cpu:
+            elif int(os.environ.get("LOCAL_RANK", -1)) != -1 and not cpu and torch.cuda.is_available():
                 self.distributed_type = DistributedType.MULTI_GPU
                 if not torch.distributed.is_initialized():
                     self.backend = kwargs.pop("backend", "nccl")
@@ -200,7 +200,10 @@ class PartialState:
                     self.distributed_type = DistributedType.MULTI_XPU
                 else:
                     self.distributed_type = DistributedType.MULTI_CPU
-                if is_ccl_available() and get_int_from_env(["CCL_WORKER_COUNT"], 0) > 0:
+                # Actually, CCL_WORKER_COUNT is a CPU only env var in CCL, no need to set it for XPU.
+                if is_ccl_available() and (
+                    get_int_from_env(["CCL_WORKER_COUNT"], 0) > 0 or self.distributed_type == DistributedType.MULTI_XPU
+                ):
                     if get_ccl_version() >= "1.12":
                         import oneccl_bindings_for_pytorch  # noqa: F401
                     else:
@@ -231,6 +234,20 @@ class PartialState:
                             "Looks like distributed multinode run but MASTER_ADDR env not set, "
                             "please try exporting rank 0's hostname as MASTER_ADDR"
                         )
+                if (
+                    self.distributed_type == DistributedType.MULTI_CPU
+                    and get_int_from_env(["OMP_NUM_THREADS", "MKL_NUM_THREADS"], 0) == 0
+                ):
+                    import psutil
+
+                    num_cpu_threads_per_process = int(psutil.cpu_count(logical=False) / local_size)
+                    if num_cpu_threads_per_process == 0:
+                        num_cpu_threads_per_process = 1
+                    torch.set_num_threads(num_cpu_threads_per_process)
+                    warnings.warn(
+                        f"OMP_NUM_THREADS/MKL_NUM_THREADS unset, we set it at {num_cpu_threads_per_process} to improve oob"
+                        " performance."
+                    )
                 if not torch.distributed.is_initialized():
                     # Backend is not set by the user, we set it here
                     kwargs.pop("backend", None)
@@ -238,9 +255,13 @@ class PartialState:
                     torch.distributed.init_process_group(self.backend, rank=rank, world_size=size, **kwargs)
                 self.num_processes = torch.distributed.get_world_size()
                 self.process_index = torch.distributed.get_rank()
-                self.local_process_index = local_rank
-                if self.device is None:
-                    self.device = torch.device("cpu") if cpu else self.default_device
+                if cpu:
+                    self.device = torch.device("cpu")
+                elif is_xpu_available():
+                    self.device = torch.device("xpu", self.local_process_index)
+                    torch.xpu.set_device(self.device)
+                else:
+                    self.device = self.default_device
             else:
                 self.distributed_type = DistributedType.NO
                 self.num_processes = 1
@@ -322,6 +343,7 @@ class PartialState:
         """
         if self.distributed_type in (
             DistributedType.MULTI_GPU,
+            DistributedType.MULTI_XPU,
             DistributedType.MULTI_CPU,
             DistributedType.DEEPSPEED,
             DistributedType.FSDP,

@@ -348,6 +348,25 @@ def get_cluster_input():
                 fsdp_state_dict_type_query,
                 FSDP_STATE_DICT_TYPE,
                 lambda x: FSDP_STATE_DICT_TYPE[int(x)],
+                default=2,
+            )
+            fsdp_config["fsdp_forward_prefetch"] = _ask_field(
+                "Do you want to enable FSDP's forward prefetch policy? [yes/NO]: ",
+                _convert_yes_no_to_bool,
+                default=False,
+                error_message="Please enter yes or no.",
+            )
+            fsdp_config["fsdp_use_orig_params"] = _ask_field(
+                "Do you want to enable FSDP's `use_orig_params` feature? [yes/NO]: ",
+                _convert_yes_no_to_bool,
+                default=False,
+                error_message="Please enter yes or no.",
+            )
+            fsdp_config["fsdp_sync_module_states"] = _ask_field(
+                "Do you want each individually wrapped FSDP unit to broadcast module parameters from rank 0 at the start? [yes/NO]: ",
+                _convert_yes_no_to_bool,
+                default=False,
+                error_message="Please enter yes or no.",
             )
 
     megatron_lm_config = {}
@@ -448,7 +467,11 @@ def get_cluster_input():
     else:
         num_processes = 1
 
-    if distributed_type in [DistributedType.MULTI_GPU, DistributedType.NO] and not use_cpu and not use_mps:
+    if (
+        distributed_type in [DistributedType.MULTI_GPU, DistributedType.MULTI_XPU, DistributedType.NO]
+        and not use_cpu
+        and not use_mps
+    ):
         gpu_ids = _ask_field(
             "What GPU(s) (by id) should be used for training on this machine as a comma-seperated list? [all]:",
             default="all",
