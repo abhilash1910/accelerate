@@ -163,6 +163,11 @@ def set_module_tensor_to_device(
     with torch.no_grad():
         if value is None:
             new_value = old_value.to(device)
+            if dtype is not None and device in ["meta", torch.device("meta")]:
+                new_value = new_value.to(dtype)
+                if not is_buffer:
+                    param_cls = type(module._parameters[tensor_name])
+                    module._parameters[tensor_name] = param_cls(new_value, requires_grad=old_value.requires_grad)
         elif isinstance(value, torch.Tensor):
             new_value = value.to(device)
         else:
@@ -259,7 +264,7 @@ def check_tied_parameters_in_config(model: nn.Module):
         has_tied_encoder_decoder = (
             hasattr(model, "config")
             and getattr(model.config, "is_encoder_decoder", False)
-            and getattr(model.config, "tie_encoder_decoder", False),
+            and getattr(model.config, "tie_encoder_decoder", False)
         )
         has_tied_module = any(hasattr(module, "_tie_weights") for module in model.modules())
 
@@ -582,7 +587,18 @@ def get_balanced_memory(
     if not is_xpu_available():
         num_devices = len([d for d in max_memory if torch.device(d).type == "cuda" and max_memory[d] > 0])
     else:
-        num_devices = len([d for d in max_memory if torch.device(d).type == "xpu" and max_memory[d] > 0])
+        num_devices = len(
+            [
+                d
+                for d in max_memory
+                if (torch.device(d).type == "xpu" or torch.xpu.get_device_properties(d).dev_type == "gpu")
+                and max_memory[d] > 0
+            ]
+        )
+
+    if num_devices == 1:
+        # We cannot do low_zero on just one GPU
+        low_zero = False
 
     module_sizes = compute_module_sizes(model, dtype=dtype, special_dtypes=special_dtypes)
     per_gpu = module_sizes[""] // (num_devices - 1 if low_zero else num_devices)
@@ -629,7 +645,7 @@ def get_balanced_memory(
     last_gpu = max(i for i in max_memory if isinstance(i, int) and max_memory[i] > 0)
     # The last device is left with max_memory just in case the buffer is not enough.
     for i in range(last_gpu):
-        max_memory[i] = min(0 if low_zero and i == 0 else per_gpu, max_memory[i])
+        max_memory[i] = min(max_memory[0] if low_zero and i == 0 else per_gpu, max_memory[i])
 
     if low_zero:
         min_zero = max(0, module_sizes[""] - sum([max_memory[i] for i in range(1, num_devices)]))
@@ -1107,10 +1123,14 @@ def load_checkpoint_in_model(
 
                 if param_device == "disk":
                     if offload_buffers or param_name not in buffer_names:
-                        set_module_tensor_to_device(model, param_name, "meta")
+                        if dtype is None:
+                            dtype = param.dtype
+                        set_module_tensor_to_device(model, param_name, "meta", dtype=dtype)
                     offload_weight(param, param_name, offload_folder, index=offload_index)
                 elif param_device == "cpu" and offload_state_dict:
-                    set_module_tensor_to_device(model, param_name, "meta")
+                    if dtype is None:
+                        dtype = param.dtype
+                    set_module_tensor_to_device(model, param_name, "meta", dtype=dtype)
                     offload_weight(param, param_name, state_dict_folder, index=state_dict_index)
                 else:
                     set_module_tensor_to_device(model, param_name, param_device, value=param, dtype=dtype)

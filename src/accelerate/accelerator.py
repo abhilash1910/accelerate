@@ -88,6 +88,7 @@ from .utils.constants import FSDP_PYTORCH_VERSION
 
 if is_deepspeed_available():
     import deepspeed
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
     from .utils import (
         DeepSpeedEngineWrapper,
@@ -255,7 +256,7 @@ class Accelerator:
         else:
             self.project_configuration = ProjectConfiguration(project_dir=project_dir)
         if project_dir is not None and self.project_dir is None:
-            self.project_configuration.project_dir = project_dir
+            self.project_configuration.set_directories(project_dir)
         if mixed_precision is not None:
             mixed_precision = str(mixed_precision)
             if mixed_precision not in PrecisionType:
@@ -277,8 +278,8 @@ class Accelerator:
         if deepspeed_plugin:
             if not is_deepspeed_available():
                 raise ImportError("DeepSpeed is not installed => run `pip install deepspeed` or build it from source.")
-            if compare_versions("deepspeed", "<", "0.6.5"):
-                raise ImportError("DeepSpeed version must be >= 0.6.5. Please update DeepSpeed.")
+            if compare_versions("deepspeed", "<", "0.9.3"):
+                raise ImportError("DeepSpeed version must be >= 0.9.3. Please update DeepSpeed.")
 
             mixed_precision = (
                 os.environ.get("ACCELERATE_MIXED_PRECISION", "no") if mixed_precision is None else mixed_precision
@@ -857,7 +858,7 @@ class Accelerator:
 
     def _do_sync(self):
         "Sets the right `sync_gradients` context and either resets or increases `self.step`"
-        if self.gradient_state.end_of_dataloader:
+        if self.gradient_state.sync_with_dataloader and self.gradient_state.end_of_dataloader:
             self.step = 0
             self.gradient_state._set_sync_gradients(True)
         else:
@@ -1324,15 +1325,19 @@ class Accelerator:
                 model = torch.nn.parallel.DistributedDataParallel(model, **kwargs)
         if self.native_amp:
             model._original_forward = model.forward
+            model_forward_func = model.forward.__func__ if hasattr(model.forward, "__func__") else model.forward
             if self.mixed_precision == "fp16" and is_torch_version(">=", "1.10"):
-                model.forward = MethodType(torch.cuda.amp.autocast(dtype=torch.float16)(model.forward.__func__), model)
+                new_forward = torch.cuda.amp.autocast(dtype=torch.float16)(model_forward_func)
             elif self.mixed_precision == "bf16" and self.distributed_type != DistributedType.TPU:
-                model.forward = MethodType(
-                    torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)(model.forward.__func__), model
-                )
+                new_forward = torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)(model_forward_func)
             else:
-                model.forward = MethodType(torch.cuda.amp.autocast()(model.forward.__func__), model)
-            model.forward = MethodType(convert_outputs_to_fp32(model.forward.__func__), model)
+                new_forward = torch.cuda.amp.autocast()(model_forward_func)
+
+            if hasattr(model.forward, "__func__"):
+                model.forward = MethodType(new_forward, model)
+                model.forward = MethodType(convert_outputs_to_fp32(model.forward.__func__), model)
+            else:
+                model.forward = convert_outputs_to_fp32(new_forward)
         elif self.mixed_precision == "fp8":
             if not has_transformer_engine_layers(model):
                 with torch.no_grad():
@@ -2682,20 +2687,20 @@ class Accelerator:
         >>> state_dict = accelerator.get_state_dict(net)
         ```
         """
-        is_zero_3 = False
-        if self.distributed_type == DistributedType.DEEPSPEED:
-            is_zero_3 = self.deepspeed_config["zero_optimization"]["stage"] == 3
 
-        if is_zero_3:
-            if model.zero_gather_16bit_weights_on_model_save():
-                state_dict = model._zero3_consolidated_16bit_state_dict()
+        if self.distributed_type == DistributedType.DEEPSPEED:
+            if self.deepspeed_config["zero_optimization"]["stage"] == 3:
+                if model.zero_gather_16bit_weights_on_model_save():
+                    state_dict = model._zero3_consolidated_16bit_state_dict()
+                else:
+                    raise ValueError(
+                        "Cannot get 16bit model weights because `stage3_gather_16bit_weights_on_model_save` in DeepSpeed config is False. "
+                        "To save the model weights in 16bit, set `stage3_gather_16bit_weights_on_model_save` to True in DeepSpeed config file or "
+                        "set `zero3_save_16bit_model` to True when using `accelerate config`. "
+                        "To save the full checkpoint, run `model.save_checkpoint(save_dir)` and use `zero_to_fp32.py` to recover weights."
+                    )
             else:
-                raise ValueError(
-                    "Cannot get 16bit model weights because `stage3_gather_16bit_weights_on_model_save` in DeepSpeed config is False. "
-                    "To save the model weights in 16bit, set `stage3_gather_16bit_weights_on_model_save` to True in DeepSpeed config file or "
-                    "set `zero3_save_16bit_model` to True when using `accelerate config`. "
-                    "To save the full checkpoint, run `model.save_checkpoint(save_dir)` and use `zero_to_fp32.py` to recover weights."
-                )
+                state_dict = clone_tensors_for_torch_save(self.unwrap_model(model).state_dict())
         else:
             if unwrap:
                 model = self.unwrap_model(model)
