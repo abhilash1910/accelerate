@@ -159,7 +159,7 @@ def set_module_tensor_to_device(
             value = value.to(old_value.dtype)
         elif not str(value.dtype).startswith(("torch.uint", "torch.int", "torch.bool")):
             value = value.to(dtype)
-    if is_xpu_available() and torch.xpu.get_device_properties(d).dev_type == "gpu":
+    if is_xpu_available() and torch.xpu.get_device_properties(device).dev_type == "gpu":
         device = torch.device(f"xpu:{device}")
     with torch.no_grad():
         if value is None:
