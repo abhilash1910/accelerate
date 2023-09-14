@@ -16,14 +16,13 @@ import importlib
 import importlib.metadata
 import os
 import warnings
-from distutils.util import strtobool
 from functools import lru_cache
 
 import torch
 from packaging import version
 from packaging.version import parse
 
-from .environment import parse_flag_from_env
+from .environment import parse_flag_from_env, str_to_bool
 from .versions import compare_versions, is_torch_version
 
 
@@ -77,19 +76,33 @@ def is_fp8_available():
     return _is_package_available("transformer_engine")
 
 
+def is_cuda_available():
+    """
+    Checks if `cuda` is available via an `nvml-based` check which won't trigger the drivers and leave cuda
+    uninitialized.
+    """
+    try:
+        os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = str(1)
+        available = torch.cuda.is_available()
+    finally:
+        os.environ.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
+    return available
+
+
 @lru_cache
 def is_tpu_available(check_device=True):
     "Checks if `torch_xla` is installed and potentially if a TPU is in the environment"
     # Due to bugs on the amp series GPUs, we disable torch-xla on them
-    if torch.cuda.is_available():
+    if is_cuda_available():
         return False
-    if _tpu_available and check_device:
-        try:
-            # Will raise a RuntimeError if no XLA configuration is found
-            _ = xm.xla_device()
-            return True
-        except RuntimeError:
-            return False
+    if check_device:
+        if _tpu_available:
+            try:
+                # Will raise a RuntimeError if no XLA configuration is found
+                _ = xm.xla_device()
+                return True
+            except RuntimeError:
+                return False
     return _tpu_available
 
 
@@ -103,8 +116,6 @@ def is_bf16_available(ignore_tpu=False):
         return not ignore_tpu
     if torch.cuda.is_available():
         return torch.cuda.is_bf16_supported()
-    if is_npu_available():
-        return False
     return True
 
 
@@ -129,7 +140,7 @@ def is_bnb_available():
 
 
 def is_megatron_lm_available():
-    if strtobool(os.environ.get("ACCELERATE_USE_MEGATRON_LM", "False")) == 1:
+    if str_to_bool(os.environ.get("ACCELERATE_USE_MEGATRON_LM", "False")) == 1:
         package_exists = importlib.util.find_spec("megatron") is not None
         if package_exists:
             try:
@@ -150,6 +161,10 @@ def is_transformers_available():
 
 def is_datasets_available():
     return _is_package_available("datasets")
+
+
+def is_timm_available():
+    return _is_package_available("timm")
 
 
 def is_aim_available():
@@ -196,7 +211,16 @@ def is_tqdm_available():
 
 
 def is_mlflow_available():
-    return _is_package_available("mlflow")
+    if _is_package_available("mlflow"):
+        return True
+
+    if importlib.util.find_spec("mlflow") is not None:
+        try:
+            _ = importlib.metadata.metadata("mlflow-skinny")
+            return True
+        except importlib.metadata.PackageNotFoundError:
+            return False
+    return False
 
 
 def is_mps_available():

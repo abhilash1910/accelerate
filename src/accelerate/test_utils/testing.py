@@ -20,7 +20,6 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from distutils.util import strtobool
 from functools import partial
 from pathlib import Path
 from typing import List, Union
@@ -38,11 +37,13 @@ from ..utils import (
     is_mps_available,
     is_safetensors_available,
     is_tensorboard_available,
+    is_timm_available,
     is_torch_version,
     is_tpu_available,
     is_transformers_available,
     is_wandb_available,
     is_xpu_available,
+    str_to_bool,
 )
 
 
@@ -55,7 +56,7 @@ def parse_flag_from_env(key, default=False):
     else:
         # KEY is set, convert it to True or False.
         try:
-            _value = strtobool(value)
+            _value = str_to_bool(value)
         except ValueError:
             # More values are supported, but let's keep the message simple.
             raise ValueError(f"If set, {key} must be yes or no.")
@@ -114,6 +115,20 @@ def require_huggingface_suite(test_case):
     return unittest.skipUnless(
         is_transformers_available() and is_datasets_available(), "test requires the Hugging Face suite"
     )(test_case)
+
+
+def require_transformers(test_case):
+    """
+    Decorator marking a test that requires transformers. These tests are skipped when they are not.
+    """
+    return unittest.skipUnless(is_transformers_available(), "test requires the transformers library")(test_case)
+
+
+def require_timm(test_case):
+    """
+    Decorator marking a test that requires transformers. These tests are skipped when they are not.
+    """
+    return unittest.skipUnless(is_timm_available(), "test requires the timm library")(test_case)
 
 
 def require_bnb(test_case):

@@ -18,19 +18,36 @@ import tempfile
 
 import torch
 
-from .state import AcceleratorState
+from .state import AcceleratorState, PartialState
 from .utils import PrecisionType, PrepareForLaunch, is_mps_available, patch_environment
 
 
-def notebook_launcher(function, args=(), num_processes=None, mixed_precision="no", use_port="29500"):
+def test_launch():
+    "Verify a `PartialState` can be initialized."
+    _ = PartialState()
+
+
+def notebook_launcher(
+    function,
+    args=(),
+    num_processes=None,
+    mixed_precision="no",
+    use_port="29500",
+    master_addr="127.0.0.1",
+    node_rank=0,
+    num_nodes=1,
+):
     """
-    Launches a training function, using several processes if it's possible in the current environment (TPU with
-    multiple cores for instance).
+    Launches a training function, using several processes or multiple nodes if it's possible in the current environment
+    (TPU with multiple cores for instance).
 
     <Tip warning={true}>
 
     To use this function absolutely zero calls to a CUDA device must be made in the notebook session before calling. If
     any have been made, you will need to restart the notebook and make sure no cells use any CUDA capability.
+
+    Setting `ACCELERATE_DEBUG_MODE="1"` in your environment will run a test before truly launching to ensure that none
+    of those calls have been made.
 
     </Tip>
 
@@ -47,6 +64,12 @@ def notebook_launcher(function, args=(), num_processes=None, mixed_precision="no
             If `fp16` or `bf16`, will use mixed precision training on multi-GPU.
         use_port (`str`, *optional*, defaults to `"29500"`):
             The port to use to communicate between processes when launching a multi-GPU training.
+        master_addr (`str`, *optional*, defaults to `"127.0.0.1"`):
+            The address to use for communication between processes.
+        node_rank (`int`, *optional*, defaults to 0):
+            The rank of the current node.
+        num_nodes (`int`, *optional*, defaults to 1):
+            The number of nodes to use for training.
 
     Example:
 
@@ -106,7 +129,8 @@ def notebook_launcher(function, args=(), num_processes=None, mixed_precision="no
             raise ValueError(
                 "You have to specify the number of GPUs you would like to use, add `num_processes=...` to your call."
             )
-
+        if node_rank >= num_nodes:
+            raise ValueError("The node_rank must be less than the number of nodes.")
         if num_processes > 1:
             # Multi-GPU launch
             from torch.multiprocessing import start_processes
@@ -118,19 +142,33 @@ def notebook_launcher(function, args=(), num_processes=None, mixed_precision="no
                     "inside your training function. Restart your notebook and make sure no cells initializes an "
                     "`Accelerator`."
                 )
-
-            if torch.cuda.is_initialized():
-                raise ValueError(
-                    "To launch a multi-GPU training from your notebook, you need to avoid running any instruction "
-                    "using `torch.cuda` in any cell. Restart your notebook and make sure no cells use any CUDA "
-                    "function."
-                )
-
             # torch.distributed will expect a few environment variable to be here. We set the ones common to each
             # process here (the other ones will be set be the launcher).
             with patch_environment(
-                world_size=num_processes, master_addr="127.0.01", master_port=use_port, mixed_precision=mixed_precision
+                nproc=num_processes,
+                node_rank=node_rank,
+                world_size=num_nodes * num_processes,
+                master_addr=master_addr,
+                master_port=use_port,
+                mixed_precision=mixed_precision,
             ):
+                # First dummy launch
+                if os.environ.get("ACCELERATE_DEBUG_MODE", "false").lower() == "true":
+                    launcher = PrepareForLaunch(test_launch, distributed_type="MULTI_GPU")
+                    try:
+                        start_processes(launcher, args=(), nprocs=num_processes, start_method="fork")
+                    except ProcessRaisedException as e:
+                        err = "An issue was found when verifying a stable environment for the notebook launcher."
+                        if "Cannot re-initialize CUDA in forked subprocess" in e.args[0]:
+                            raise RuntimeError(
+                                f"{err}"
+                                "This likely stems from an outside import causing issues once the `notebook_launcher()` is called. "
+                                "Please review your imports and test them when running the `notebook_launcher()` to identify "
+                                "which one is problematic and causing CUDA to be initialized."
+                            ) from e
+                        else:
+                            raise RuntimeError(f"{err} The following error was raised: {e}") from e
+                # Now the actual launch
                 launcher = PrepareForLaunch(function, distributed_type="MULTI_GPU")
                 print(f"Launching training on {num_processes} GPUs.")
                 try:
@@ -141,8 +179,10 @@ def notebook_launcher(function, args=(), num_processes=None, mixed_precision="no
                             "CUDA has been initialized before the `notebook_launcher` could create a forked subprocess. "
                             "This likely stems from an outside import causing issues once the `notebook_launcher()` is called. "
                             "Please review your imports and test them when running the `notebook_launcher()` to identify "
-                            "which one is problematic."
+                            "which one is problematic and causing CUDA to be initialized."
                         ) from e
+                    else:
+                        raise RuntimeError(f"An issue was found when launching the training: {e}") from e
 
         else:
             # No need for a distributed launch otherwise as it's either CPU, GPU or MPS.

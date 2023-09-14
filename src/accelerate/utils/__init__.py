@@ -35,7 +35,7 @@ from .dataclasses import (
     TensorInformation,
     TorchDynamoPlugin,
 )
-from .environment import get_int_from_env, parse_choice_from_env, parse_flag_from_env
+from .environment import get_int_from_env, parse_choice_from_env, parse_flag_from_env, str_to_bool
 from .imports import (
     get_ccl_version,
     is_4bit_bnb_available,
@@ -46,6 +46,7 @@ from .imports import (
     is_boto3_available,
     is_ccl_available,
     is_comet_ml_available,
+    is_cuda_available,
     is_datasets_available,
     is_deepspeed_available,
     is_fp8_available,
@@ -58,12 +59,14 @@ from .imports import (
     is_safetensors_available,
     is_sagemaker_available,
     is_tensorboard_available,
+    is_timm_available,
     is_tpu_available,
     is_transformers_available,
     is_wandb_available,
     is_xpu_available,
 )
 from .modeling import (
+    calculate_maximum_sizes,
     check_device_map,
     check_tied_parameters_in_config,
     check_tied_parameters_on_same_device,
@@ -162,6 +165,7 @@ from .megatron_lm import prepare_scheduler as megatron_lm_prepare_scheduler
 from .memory import find_executable_batch_size, release_memory
 from .other import (
     clear_environment,
+    convert_bytes,
     extract_model_from_parallel,
     get_pretty_name,
     is_port_in_use,

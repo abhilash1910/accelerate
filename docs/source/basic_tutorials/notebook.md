@@ -401,6 +401,26 @@ args = ("fp16", 42, 64)
 notebook_launcher(training_loop, args, num_processes=2)
 ```
 
+In the case of running on multiple nodes, you need to set up a Jupyter session at each node and run the launching cell at the same time.
+
+For an environment containing 2 nodes (computers) with 8 GPUs each and the main computer with an IP address of "172.31.43.8", it would look like so:
+
+```python
+notebook_launcher(training_loop, args, master_addr="172.31.43.8", node_rank=0, num_nodes=2, num_processes=8)
+```
+
+And in the second Jupyter session on the other machine:
+
+<Tip>
+
+    Notice how the `node_rank` has changed
+
+</Tip>
+
+```python
+notebook_launcher(training_loop, args, master_addr="172.31.43.8", node_rank=1, num_nodes=2, num_processes=8)
+```
+
 In the case of running on the TPU, it would look like so:
 
 ```python
@@ -422,6 +442,13 @@ epoch 4: 94.71
 ```
 
 And that's it!
+
+## Debugging 
+
+A common issue when running the `notebook_launcher` is receiving a CUDA has already been initialized issue. This usually stems
+from an import or prior code in the notebook that makes a call to the PyTorch `torch.cuda` sublibrary. To help narrow down what went wrong,
+you can launch the `notebook_launcher` with `ACCELERATE_DEBUG_MODE=yes` in your environment and an additional check
+will be made when spawning that a regular process can be created and utilize CUDA without issue. (Your CUDA code can still be ran afterwards).
 
 ## Conclusion
 
